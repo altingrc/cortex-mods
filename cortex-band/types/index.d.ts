@@ -14,10 +14,10 @@ declare module 'claude-code' {
       busy: boolean
       /** The band's open tab: a plugin's name, null for the first. */
       tab: string | null
-      /** True for a moment after a switch or refresh worked: the mark shows a check. */
-      done: boolean
       /** Closed by the person: hidden for this session, back in the next one. */
       hidden: boolean
+      /** When this session last read Cortex, in $.clock.now()'s ms. */
+      lastAt: number
     }
   }
 }

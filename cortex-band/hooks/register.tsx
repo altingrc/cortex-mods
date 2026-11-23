@@ -11,25 +11,18 @@ const busy = atom({ plugin: 'cortex-band', key: 'busy' } as const, false)
 // Cortex's own mark (app/icon.svg): it follows light and dark mode by itself.
 const LOGO = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"6 3 56 56\">\n  <style>.h{fill:#1c1917}.d{fill:#4f46e5}@media (prefers-color-scheme:dark){.h{fill:#f5f5f4}.d{fill:#818cf8}}</style>\n  <path class=\"h\" fill-rule=\"evenodd\" d=\"M20 56V46C12 41 10 33 10 28C10 15 20 6 32 6C45 6 54 15 54 27L58 36H53V44C53 48 50 50 46 50H40V56ZM27.36 24.9L25.18 21.12A2.1 2.1 0 0 1 28.82 19.02L31 22.8L33.18 19.02A2.1 2.1 0 0 1 36.82 21.12L34.64 24.9L39 24.9A2.1 2.1 0 0 1 39 29.1L34.64 29.1L36.82 32.88A2.1 2.1 0 0 1 33.18 34.98L31 31.2L28.82 34.98A2.1 2.1 0 0 1 25.18 32.88L27.36 29.1L23 29.1A2.1 2.1 0 0 1 23 24.9Z\"/>\n  <circle class=\"d\" cx=\"31\" cy=\"27\" r=\"1.7\"/>\n</svg>"
 
-// Shown in the mark's place for a moment after a switch or refresh worked.
-const CHECK =
-  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="#16a34a"/><path d="M7 12.5l3.2 3.2L17 9" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+// A problem sits on a dark card in light and dark mode alike, so its text and icon stay light.
+const ISSUE_BG = '#171717'
+const ISSUE_TEXT = '#f5f5f4'
+// Remix's information-line, beside a problem.
+const INFO =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#f5f5f4" d="M12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10Zm0-2a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM11 7h2v2h-2V7Zm0 4h2v6h-2v-6Z"/></svg>'
 
 // Sync runs /cortex, the skill the team installs from Cortex; without it, no Sync.
 export const syncCommand = (names: readonly string[]) => (names.includes('cortex') ? 'cortex' : null)
 
 // $.state is the session's: a new session starts with the band shown again.
 const hidden = atom({ plugin: 'cortex-band', key: 'hidden' } as const, false)
-const done = atom({ plugin: 'cortex-band', key: 'done' } as const, false)
-let flashes = 0
-
-// The check replaces the toast: it shows for 2 s, unless a newer one took over.
-async function flash($: EngineInterface) {
-  const mine = ++flashes
-  await update($, done, () => true)
-  await $.clock.sleep(2000)
-  if (mine === flashes) await update($, done, () => false)
-}
 
 const tab = atom({ plugin: 'cortex-band', key: 'tab' } as const, null)
 
@@ -71,7 +64,24 @@ const CONNECTORS = 'https://claude.ai/settings/connectors'
 // shortcut: matched on the error's words, switch to a reason code if the engine gives one.
 export const isConnectError = (error: string) => /not connected|sign.?in|auth|unauthori[sz]ed|401|403/i.test(error)
 
-let lastAt = 0
+// A Button, not a Link, so Connect is drawn like Sync. The mod API opens no URL itself.
+// shortcut: macOS `open` only; a Windows or SSH host gets the address in a toast instead.
+async function openConnectors($: EngineInterface) {
+  const r = await $.process.run(['open', CONNECTORS]).catch(() => null)
+  if (r?.exitCode !== 0) $.ui.toast(`Open ${CONNECTORS} to connect Cortex`)
+}
+
+// Per session: a read in another session must not hold this one's first read back.
+const lastAt = atom({ plugin: 'cortex-band', key: 'lastAt' } as const, 0)
+
+// A new session's connectors are still loading when it starts: wait up to 45 s for
+// Cortex's tools before reading, so the band says Connecting… instead of Connect.
+async function whenConnected($: EngineInterface) {
+  for (let i = 0; i < 15; i++) {
+    if ((await $.tool.list()).some(t => t.mcp && t.name.endsWith('__cortex_list_orgs'))) return
+    await $.clock.sleep(3000)
+  }
+}
 
 const within = <T,>($: EngineInterface, ms: number, p: Promise<T>) =>
   Promise.race([p, $.clock.sleep(ms).then((): T => { throw new Error(`Cortex didn't answer in ${ms / 1000}s`) })])
@@ -91,7 +101,6 @@ async function switchOrg($: EngineInterface, slug: string) {
     })())
     if (mine !== switches) return
     await update($, orgs, () => ({ orgs: list, error: null }))
-    void flash($)
   } catch (err) {
     if (mine !== switches) return
     const message = err instanceof Error ? err.message : String(err)
@@ -100,19 +109,19 @@ async function switchOrg($: EngineInterface, slug: string) {
   }
 }
 
-// pressed: the person asked, so show the check, or the error in a toast.
+// pressed: the person asked, so an error also goes to a toast; success shows nothing.
 async function refresh($: EngineInterface, { pressed = false }: { pressed?: boolean } = {}) {
   const now = await $.clock.now()
   if (await read($, busy)) return
-  if (!pressed && now - lastAt < EVERY_MS) return
-  lastAt = now
+  // After a failure, read again on the next turn: the throttle only spaces out good reads.
+  if (!pressed && !(await read($, orgs))?.error && now - (await read($, lastAt)) < EVERY_MS) return
+  await update($, lastAt, () => now)
   const at = switches
   await update($, busy, () => true)
   try {
     const list = await within($, 15_000, (async () => orgsOf(await call($, 'cortex_list_orgs')))())
     if (at !== switches) return
     await update($, orgs, () => ({ orgs: list, error: null }))
-    if (pressed) void flash($)
   } catch (err) {
     if (at !== switches) return
     const message = err instanceof Error ? err.message : String(err)
@@ -127,7 +136,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     // $.state outlives a reload: a refresh cut off mid-way would leave it busy for good.
     await update($, busy, () => false)
-    void refresh($)
+    void whenConnected($).then(() => refresh($))
     return next(e)
   })
 
@@ -161,20 +170,21 @@ export const register: Register = on => {
 
   // Our row: which organisation Cortex works in, Sync, and Connect or Refresh when something is wrong.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const v = await read($, orgs)
-    if (e.props.hasSurvey || v === null || (await read($, hidden))) return next(e)
+    if (e.props.hasSurvey || (await read($, hidden))) return next(e)
     const isBusy = await read($, busy)
-    const isDone = await read($, done)
     const sync = syncCommand((await $.command.list()).map(c => c.name))
     const els = $.ui.resolve(e)
-    const { Box, Text, Button, Link, Select } = els
+    const { Box, Text, Button, Select } = els
+    // Shown from the start: before the first read answers, the band says it is connecting.
+    const v = (await read($, orgs)) ?? { orgs: [], error: null }
+    const connecting = (await read($, orgs)) === null
     const active = v.orgs.find(o => o.active)
     return (
-      <Box key="cortex" flexDirection="column">
+      <Box key="cortex" flexDirection="column" gap={1}>
         <Box flexDirection="row" gap={1} alignItems="center">
           {/* The terminal has no Svg: it goes without the mark. */}
           {'Svg' in els ? (
-            <els.Svg key="logo" source={isDone ? CHECK : LOGO} alt={isDone ? 'Done' : 'Cortex'} width={18} height={18} />
+            <els.Svg key="logo" source={LOGO} alt="Cortex" width={18} height={18} />
           ) : null}
           {v.orgs.length > 0 ? (
             <Select
@@ -188,19 +198,38 @@ export const register: Register = on => {
           ) : (
             <Text bold>Cortex</Text>
           )}
+          {connecting ? <Text dimColor>Connecting…</Text> : null}
           <Box flexGrow={1} />
           <Box flexShrink={0} flexDirection="row" gap={1} alignItems="center">
-            {v.error && isConnectError(v.error) ? <Link key="connect" href={CONNECTORS} label="Connect" /> : null}
-            {/* Refresh only when something went wrong: it reads by itself after every turn. */}
-            {v.error ? <Button key="refresh" plain label={isBusy ? 'Refreshing…' : 'Refresh'} onPress={() => refresh($, { pressed: true })} /> : null}
-            {sync ? <Button key="sync" plain label="Sync" onPress={() => $.command.run({ command: sync, args: '' })} /> : null}
+            {sync ? <Button key="sync" variant="secondary" label="Sync" onPress={() => $.command.run({ command: sync, args: '' })} /> : null}
             <Button key="close" plain role="dismiss" label="×" onPress={() => update($, hidden, () => true)} />
           </Box>
         </Box>
+        {/* A problem gets its own dark card: what went wrong, then what fixes it. */}
         {v.error ? (
-          <Text dimColor wrap="truncate-end">
-            ⚠ {v.error}
-          </Text>
+          <Box
+            key="issue"
+            flexDirection="row"
+            flexWrap="wrap"
+            alignItems="center"
+            gap={1}
+            backgroundColor={ISSUE_BG}
+            // No radius prop: a round border in the card's own colour rounds its corners.
+            borderStyle="round"
+            borderColor={ISSUE_BG}
+            padding={1}
+          >
+            <Box flexGrow={1} flexShrink={1} flexDirection="row" gap={1} alignItems="center">
+              {/* The terminal has no Svg: there the line starts with a plain "!". */}
+              {'Svg' in els ? <els.Svg key="info" source={INFO} alt="Problem" width={14} height={14} /> : <Text>!</Text>}
+              <Text color={ISSUE_TEXT} wrap="wrap">{v.error}</Text>
+            </Box>
+            <Box flexShrink={0} flexDirection="row" gap={1} alignItems="center">
+              {isConnectError(v.error) ? <Button key="connect" variant="secondary" label="Connect" onPress={() => openConnectors($)} /> : null}
+              {/* Refresh only when something went wrong: it reads by itself after every turn. */}
+              <Button key="refresh" variant="secondary" label={isBusy ? 'Refreshing…' : 'Refresh'} onPress={() => refresh($, { pressed: true })} />
+            </Box>
+          </Box>
         ) : null}
       </Box>
     )
