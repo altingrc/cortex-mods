@@ -1,0 +1,6 @@
+{
+  "name": "cortex-band",
+  "version": "0.1.0",
+  "description": "A Cortex row above the prompt: pick the organisation Cortex works in, Sync, and Connect when the connector is off.",
+  "types": "./types/index.d.ts"
+}

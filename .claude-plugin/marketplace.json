@@ -1,0 +1,5 @@
+{
+  "name": "cortex-mods",
+  "owner": { "name": "Altin Grainca" },
+  "plugins": [{ "name": "cortex-band", "source": "./cortex-band" }]
+}
